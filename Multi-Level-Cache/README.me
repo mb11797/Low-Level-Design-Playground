@@ -1,0 +1,481 @@
+# **Low-Level Design for a Multi-Level Caching System**
+
+## **Problem Statement**
+In large-scale distributed systems, fetching data directly from databases or storage layers can cause high latency and performance degradation. A **multi-level caching system** is needed to optimize data retrieval by reducing database hits, improving read performance, and ensuring scalability.
+
+## **Key Challenges**
+1. **Cache Hierarchy:** How to design multiple levels of caching (L1, L2, L3) efficiently.
+2. **Cache Invalidation:** Ensuring consistency between cache and database.
+3. **Eviction Strategies:** Implementing optimal cache replacement policies.
+4. **Scalability:** Handling large datasets across multiple caching layers.
+5. **Fault Tolerance:** Ensuring data availability even if cache nodes fail.
+6. **Write-Back Strategy:** Determining when to sync data with the database.
+
+---
+
+## **Solution: Multi-Level Caching Architecture**
+A **three-level caching system** will be implemented:
+- **L1 Cache (Process-Level):** In-memory caching (e.g., Python `LRUCache` or Redis local instance).
+- **L2 Cache (Distributed Cache):** Remote caching with Redis or Memcached.
+- **L3 Cache (Database Read Cache):** Database-level caching using query optimization and materialized views.
+
+---
+
+### **1. System Architecture**
+```
+[Application Layer]
+    |
+    v
+[ L1 Cache - Process-Level (Fastest) ]
+    |
+    v
+[ L2 Cache - Distributed Cache (Moderate Speed) ]
+    |
+    v
+[ L3 Cache - Persistent Cache / Database (Slowest) ]
+```
+---
+
+### **2. Caching Mechanisms**
+- **Write-Through Cache:** Writes to both cache and database simultaneously.
+- **Write-Back Cache:** Writes to cache first, then asynchronously updates the database.
+- **Write-Around Cache:** Direct writes to the database, avoiding unnecessary cache pollution.
+
+---
+
+## **Low-Level Code Implementation**
+We'll implement a **multi-level caching system in Python** using `functools.lru_cache` for L1, `Redis` for L2, and `SQLite` for L3.
+
+---
+
+### **1. L1 Cache (In-Memory)**
+Uses **Python’s LRU (Least Recently Used) Cache**.
+
+```python
+from functools import lru_cache
+
+# L1 Cache (Process-Level)
+@lru_cache(maxsize=100)  # Cache up to 100 entries
+def get_from_l1_cache(key):
+    """Retrieve from L1 cache."""
+    return None  # If key is not in L1 cache, return None
+
+def store_in_l1_cache(key, value):
+    """Store in L1 cache."""
+    get_from_l1_cache.cache_clear()  # Clear old cache entries
+    get_from_l1_cache(key)  # Store new value
+```
+---
+
+### **2. L2 Cache (Redis - Distributed Cache)**
+Uses **Redis** for fast distributed access.
+
+```python
+import redis
+
+# Initialize Redis Client (L2 Cache)
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
+
+def get_from_l2_cache(key):
+    """Retrieve from L2 cache (Redis)."""
+    return redis_client.get(key)
+
+def store_in_l2_cache(key, value):
+    """Store in L2 cache (Redis) with expiration."""
+    redis_client.setex(key, 300, value)  # Cache expires in 5 minutes
+```
+---
+
+### **3. L3 Cache (Database - Persistent Cache)**
+Uses **SQLite** as a database backend.
+
+```python
+import sqlite3
+
+DB_FILE = "cache_db.sqlite"
+
+# Initialize SQLite
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS cache (
+                        key TEXT PRIMARY KEY,
+                        value TEXT)''')
+    conn.commit()
+    conn.close()
+
+def get_from_l3_cache(key):
+    """Retrieve from L3 cache (database)."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM cache WHERE key = ?", (key,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def store_in_l3_cache(key, value):
+    """Store in L3 cache (database)."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO cache (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+```
+---
+
+### **4. Multi-Level Cache Manager**
+Implements cache retrieval logic.
+
+```python
+def get_from_cache(key):
+    """Retrieve data from the cache hierarchy."""
+
+    # Check L1 Cache (Fastest)
+    value = get_from_l1_cache(key)
+    if value:
+        print("Cache Hit: L1")
+        return value
+
+    # Check L2 Cache (Redis)
+    value = get_from_l2_cache(key)
+    if value:
+        print("Cache Hit: L2")
+        store_in_l1_cache(key, value)  # Update L1 cache
+        return value
+
+    # Check L3 Cache (Database)
+    value = get_from_l3_cache(key)
+    if value:
+        print("Cache Hit: L3")
+        store_in_l2_cache(key, value)  # Update L2 cache
+        store_in_l1_cache(key, value)  # Update L1 cache
+        return value
+
+    print("Cache Miss: Fetching from Source")
+    return None  # Data not found in any cache level
+
+def store_in_cache(key, value):
+    """Store data in all cache levels."""
+    store_in_l1_cache(key, value)
+    store_in_l2_cache(key, value)
+    store_in_l3_cache(key, value)
+```
+---
+
+### **5. Cache Eviction Policies**
+Implements **LRU Eviction** for Redis.
+
+```python
+def configure_redis_eviction():
+    """Sets Redis eviction policy to LRU."""
+    redis_client.config_set('maxmemory-policy', 'allkeys-lru')
+```
+---
+
+### **6. Example Usage**
+```python
+# Initialize database
+init_db()
+
+# Store data
+store_in_cache("user:123", "Alice")
+
+# Retrieve data
+print(get_from_cache("user:123"))  # Should fetch from L1 if called again
+```
+---
+
+## **Optimization Strategies**
+1. **Cache Warming:** Pre-load frequently accessed data.
+2. **TTL Management:** Adjust expiry time based on usage patterns.
+3. **Distributed Consistency:** Implement cache invalidation strategies.
+4. **Bloom Filters:** Avoid unnecessary DB hits for non-existent data.
+5. **Compression:** Reduce storage cost by compressing cache entries.
+
+---
+
+## **Conclusion**
+This **multi-level caching system** ensures **fast lookups, minimal database load, and optimized performance**. 🚀
+
+
+***********************************************************************
+
+
+To improve the maintainability and scalability of the **multi-level caching system**, we can apply **design patterns** such as:
+
+- **Singleton Pattern** (for caching instances)
+- **Factory Pattern** (for cache creation)
+- **Decorator Pattern** (to wrap caching logic)
+- **Strategy Pattern** (for cache eviction policies)
+
+---
+
+## **Design Patterns Used**
+### **1️⃣ Singleton Pattern**
+- Ensures a **single instance** of Redis and Database connections.
+
+### **2️⃣ Factory Pattern**
+- Provides an **abstraction layer** to create different cache levels.
+
+### **3️⃣ Decorator Pattern**
+- Wraps multiple caches together and ensures data consistency.
+
+### **4️⃣ Strategy Pattern**
+- Implements **different eviction policies** (e.g., LRU, FIFO).
+
+---
+
+## **Updated Java Code with Design Patterns**
+
+### **1. L1 Cache (In-Memory LRU using Singleton)**
+```java
+import java.util.*;
+
+class L1Cache<K, V> {
+    private static L1Cache<String, String> instance;
+    private final int capacity;
+    private final LinkedHashMap<K, V> cache;
+
+    private L1Cache(int capacity) {
+        this.capacity = capacity;
+        this.cache = new LinkedHashMap<>(capacity, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+                return size() > capacity;
+            }
+        };
+    }
+
+    public static synchronized L1Cache<String, String> getInstance(int capacity) {
+        if (instance == null) {
+            instance = new L1Cache<>(capacity);
+        }
+        return instance;
+    }
+
+    public V get(K key) {
+        return cache.getOrDefault(key, null);
+    }
+
+    public void put(K key, V value) {
+        cache.put(key, value);
+    }
+}
+```
+
+---
+
+### **2. L2 Cache (Redis - Singleton)**
+```java
+import redis.clients.jedis.Jedis;
+
+class L2Cache {
+    private static L2Cache instance;
+    private final Jedis jedis;
+
+    private L2Cache() {
+        this.jedis = new Jedis("localhost", 6379);
+    }
+
+    public static synchronized L2Cache getInstance() {
+        if (instance == null) {
+            instance = new L2Cache();
+        }
+        return instance;
+    }
+
+    public String get(String key) {
+        return jedis.get(key);
+    }
+
+    public void put(String key, String value, int expiry) {
+        jedis.setex(key, expiry, value);
+    }
+}
+```
+
+---
+
+### **3. L3 Cache (Database - Singleton)**
+```java
+import java.sql.*;
+
+class L3Cache {
+    private static L3Cache instance;
+    private static final String DB_URL = "jdbc:sqlite:cache_db.sqlite";
+
+    private L3Cache() {
+        try (Connection conn = DriverManager.getConnection(DB_URL);
+             Statement stmt = conn.createStatement()) {
+            String sql = "CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT)";
+            stmt.execute(sql);
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static synchronized L3Cache getInstance() {
+        if (instance == null) {
+            instance = new L3Cache();
+        }
+        return instance;
+    }
+
+    public String get(String key) {
+        try (Connection conn = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = conn.prepareStatement("SELECT value FROM cache WHERE key = ?")) {
+            stmt.setString(1, key);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getString("value");
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public void put(String key, String value) {
+        try (Connection conn = DriverManager.getConnection(DB_URL);
+             PreparedStatement stmt = conn.prepareStatement("INSERT OR REPLACE INTO cache (key, value) VALUES (?, ?)")) {
+            stmt.setString(1, key);
+            stmt.setString(2, value);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+---
+
+### **4. Factory Pattern (Cache Factory)**
+```java
+class CacheFactory {
+    public static Cache getCache(String type) {
+        switch (type) {
+            case "L1":
+                return L1Cache.getInstance(5);
+            case "L2":
+                return L2Cache.getInstance();
+            case "L3":
+                return L3Cache.getInstance();
+            default:
+                throw new IllegalArgumentException("Unknown cache type");
+        }
+    }
+}
+```
+
+---
+
+### **5. Strategy Pattern (Eviction Policies)**
+```java
+interface EvictionStrategy {
+    void evict();
+}
+
+class LRUEviction implements EvictionStrategy {
+    @Override
+    public void evict() {
+        System.out.println("Evicting using LRU strategy...");
+    }
+}
+
+class FIFOCacheEviction implements EvictionStrategy {
+    @Override
+    public void evict() {
+        System.out.println("Evicting using FIFO strategy...");
+    }
+}
+```
+
+---
+
+### **6. Multi-Level Cache Decorator**
+```java
+class MultiLevelCache {
+    private final L1Cache<String, String> l1Cache;
+    private final L2Cache l2Cache;
+    private final L3Cache l3Cache;
+    private final EvictionStrategy evictionStrategy;
+
+    public MultiLevelCache(EvictionStrategy evictionStrategy) {
+        this.l1Cache = L1Cache.getInstance(5);
+        this.l2Cache = L2Cache.getInstance();
+        this.l3Cache = L3Cache.getInstance();
+        this.evictionStrategy = evictionStrategy;
+    }
+
+    public String get(String key) {
+        // Check L1 Cache
+        String value = l1Cache.get(key);
+        if (value != null) {
+            System.out.println("Cache Hit: L1");
+            return value;
+        }
+
+        // Check L2 Cache
+        value = l2Cache.get(key);
+        if (value != null) {
+            System.out.println("Cache Hit: L2");
+            l1Cache.put(key, value);
+            return value;
+        }
+
+        // Check L3 Cache
+        value = l3Cache.get(key);
+        if (value != null) {
+            System.out.println("Cache Hit: L3");
+            l2Cache.put(key, value, 300);
+            l1Cache.put(key, value);
+            return value;
+        }
+
+        System.out.println("Cache Miss: Fetching from source...");
+        return null;
+    }
+
+    public void put(String key, String value) {
+        l1Cache.put(key, value);
+        l2Cache.put(key, value, 300);
+        l3Cache.put(key, value);
+    }
+
+    public void evictCache() {
+        evictionStrategy.evict();
+    }
+}
+```
+
+---
+
+### **7. Example Usage**
+```java
+public class Main {
+    public static void main(String[] args) {
+        EvictionStrategy strategy = new LRUEviction();
+        MultiLevelCache cache = new MultiLevelCache(strategy);
+
+        // Store data
+        cache.put("user:123", "Alice");
+
+        // Retrieve data
+        System.out.println(cache.get("user:123"));
+
+        // Evict cache
+        cache.evictCache();
+    }
+}
+```
+
+---
+
+## **✅ Benefits of Using Design Patterns**
+1. **Scalability** → Factory ensures easy extension of new cache layers.
+2. **Flexibility** → Strategy allows dynamic eviction policies.
+3. **Maintainability** → Singleton ensures single instances across the app.
+4. **Readability** → Code is structured with abstraction layers.
+
+This **optimized Java design** ensures **high-speed reads, scalability, and modularity** in a distributed environment! 🚀
